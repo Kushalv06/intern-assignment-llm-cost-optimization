@@ -32,6 +32,15 @@ def main() -> None:
         )
     )
 
+    for call in copilot.session.calls:
+        print(
+            f"Call: {call.label} | "
+            f"Input: {call.input_tokens} | "
+            f"Cached: {call.cached_prefix_tokens} | "
+            f"Output: {call.output_tokens} | "
+            f"Points: {call.points()}"
+        )
+
 
 if __name__ == "__main__":
     main()
