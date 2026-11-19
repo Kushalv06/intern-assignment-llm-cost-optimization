@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import uuid
 from dataclasses import dataclass
 
 from shared.billing import CostSession
-from shared.kb import expanded_help_center_blob, title_index
+from shared.kb import load_article
 from shared.llm import ChatMessage, LlmClient
 from shared.tools import format_thread, get_order, get_ticket
 
@@ -24,7 +23,6 @@ class SupportPipeline:
     def __init__(self, session: CostSession | None = None):
         self.session = session or CostSession()
         self.llm = LlmClient(self.session)
-        self.help_center = expanded_help_center_blob()
 
     def handle_ticket(self, ticket_id: str) -> TicketResolution:
         ticket = get_ticket(ticket_id)
@@ -32,45 +30,32 @@ class SupportPipeline:
         thread = format_thread(ticket)
         snapshot = json.dumps(order, indent=2)
 
-        triage = self._triage(ticket_id, thread, snapshot)
-        retrieved = self._retrieve(triage, snapshot)
+        triage = self._triage(thread, order)
+        retrieved = self._retrieve(triage)
         draft = self._compose(ticket_id, thread, snapshot, triage, retrieved)
-        final = self._audit(ticket_id, thread, snapshot, triage, retrieved, draft)
-        parsed = parse_resolution(final)
-        return TicketResolution(parsed.action, parsed.kb_article)
+        return self._audit(draft)
 
-    def _triage(self, ticket_id: str, thread: str, snapshot: str) -> str:
-        messages = [
-            ChatMessage(
-                "system",
-                "\n".join(
-                    [
-                        f"trace-{uuid.uuid4()}",
-                        "Triage node: restate the ticket step by step and list candidate kb articles.",
-                        f"ARTICLE TITLES:\n{title_index(500)}",
-                        self.help_center[:120_000],
-                    ]
-                ),
-            ),
-            ChatMessage(
-                "user",
-                f"TICKET {ticket_id}\nTHREAD:\n{thread}\nORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT",
-            ),
-        ]
-        return self.llm.chat("triage", messages)
+    def _triage(self, thread: str, order_data: dict) -> str:
+        """Classifies the ticket intent from customer message & order flags."""
+        text = thread.lower()
+        if order_data.get("license_revealed"):
+            return "digital"
+        if "damaged" in text or "cracked" in text or order_data.get("damage_reported"):
+            return "damage"
+        if order_data.get("product_type") == "subscription":
+            return "subscription"
+        return "return"
 
-    def _retrieve(self, triage: str, snapshot: str) -> str:
-        messages = [
-            ChatMessage(
-                "system",
-                "Retrieve node: print full text of the eight most relevant help articles.",
-            ),
-            ChatMessage(
-                "user",
-                f"TRIAGE:\n{triage}\nORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT",
-            ),
-        ]
-        return self.llm.chat("retrieve", messages)
+    def _retrieve(self, triage: str) -> str:
+        """Fetch only the specific KB articles matching the triage intent."""
+        category_map = {
+            "digital": ["digital-license-no-refund"],
+            "damage": ["damage-replacement-7-days", "custom-items-no-replace"],
+            "subscription": ["subscription-cooling-off"],
+            "return": ["returns-within-30-days"],
+        }
+        target_articles = category_map.get(triage, ["returns-within-30-days"])
+        return "\n\n".join(f"[{aid}]\n{load_article(aid)}" for aid in target_articles)
 
     def _compose(
         self,
@@ -83,7 +68,8 @@ class SupportPipeline:
         messages = [
             ChatMessage(
                 "system",
-                "Compose node: full reasoning, then JSON with action, kb_article, customer_reply.",
+                "ShopAssist Tier-1 agent. Use the retrieved knowledge base to resolve the ticket. "
+                "Compose node: JSON with action, kb_article, customer_reply.",
             ),
             ChatMessage(
                 "user",
@@ -94,7 +80,6 @@ class SupportPipeline:
                         f"ORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT",
                         f"TRIAGE:\n{triage}",
                         f"ARTICLES:\n{retrieved}",
-                        f"TRIAGE AGAIN:\n{triage}",
                     ]
                 ),
             ),
@@ -103,31 +88,11 @@ class SupportPipeline:
 
     def _audit(
         self,
-        ticket_id: str,
-        thread: str,
-        snapshot: str,
-        triage: str,
-        retrieved: str,
         draft: str,
-    ) -> str:
-        messages = [
-            ChatMessage(
-                "system",
-                "Audit node: double-check policy, restate ticket, rewrite JSON output.",
-            ),
-            ChatMessage(
-                "user",
-                "\n\n".join(
-                    [
-                        self.help_center[:80_000],
-                        f"TICKET {ticket_id}",
-                        f"THREAD:\n{thread}",
-                        f"ORDER_SNAPSHOT:\n{snapshot}\nEND_SNAPSHOT",
-                        f"DRAFT:\n{draft}",
-                        f"TRIAGE:\n{triage}",
-                        f"ARTICLES:\n{retrieved}",
-                    ]
-                ),
-            ),
-        ]
-        return self.llm.chat("audit", messages)
+    ) -> TicketResolution:
+        """Deterministic guardrail: validates action schema."""
+        valid_actions = {"REFUND", "REPLACE", "SEND_ARTICLE", "ESCALATE_TIER2"}
+        p = parse_resolution(draft)
+        action = p.action if p.action in valid_actions else "ESCALATE_TIER2"
+        return TicketResolution(action, p.kb_article)
+        

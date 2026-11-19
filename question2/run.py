@@ -21,6 +21,15 @@ def main() -> None:
         rows.append({"ticket_id": tid, "action": res.action, "kb_article": res.kb_article})
     print(json.dumps({"resolutions": rows, "total_points": pipe.session.total_points()}, indent=2))
 
+    for call in pipe.session.calls:
+        print(
+            f"Call: {call.label} | "
+            f"Input: {call.input_tokens} | "
+            f"Cached: {call.cached_prefix_tokens} | "
+            f"Output: {call.output_tokens} | "
+            f"Points: {call.points()}"
+        )
+
 
 if __name__ == "__main__":
     main()
