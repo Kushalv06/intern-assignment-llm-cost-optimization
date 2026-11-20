@@ -31,11 +31,15 @@ class SupportPipeline:
         snapshot = json.dumps(order, indent=2)
 
         triage = self._triage(thread, order)
+        if triage is None:
+            # Zero-token short-circuit: escalate unknown queries without calling the LLM
+            return TicketResolution("ESCALATE_TIER2", "returns-within-30-days")
+
         retrieved = self._retrieve(triage)
         draft = self._compose(ticket_id, thread, snapshot, triage, retrieved)
         return self._audit(draft)
 
-    def _triage(self, thread: str, order_data: dict) -> str:
+    def _triage(self, thread: str, order_data: dict) -> str | None:
         """Classifies the ticket intent from customer message & order flags."""
         text = thread.lower()
         if order_data.get("license_revealed"):
@@ -44,7 +48,9 @@ class SupportPipeline:
             return "damage"
         if order_data.get("product_type") == "subscription":
             return "subscription"
-        return "return"
+        if "return" in text or "refund" in text or order_data.get("product_type") == "physical":
+            return "return"
+        return None
 
     def _retrieve(self, triage: str) -> str:
         """Fetch only the specific KB articles matching the triage intent."""
